@@ -130,14 +130,19 @@ export function exportInvoices(workspaceId: number, status: StatusFilter, q = ""
     .query<ExportRow, Param[]>(
       `SELECT i.id, i.number, i.status, i.issue_date, i.due_date, i.paid_at, i.reference, i.notes,
               i.client_id, c.name AS client_name,
-              (SELECT COALESCE(SUM(${LINE_AMOUNT_SQL}), 0) FROM line_items li WHERE li.invoice_id = i.id) AS total,
-              (SELECT COUNT(*) FROM line_items li WHERE li.invoice_id = i.id) AS line_count
+              COALESCE(t.total, 0) AS total, COALESCE(t.line_count, 0) AS line_count
        FROM invoices i
        JOIN clients c ON c.id = i.client_id
+       LEFT JOIN (
+         SELECT li.invoice_id, SUM(${LINE_AMOUNT_SQL}) AS total, COUNT(*) AS line_count
+         FROM line_items li
+         WHERE li.invoice_id IN (SELECT id FROM invoices WHERE workspace_id = ?)
+         GROUP BY li.invoice_id
+       ) t ON t.invoice_id = i.id
        WHERE ${where}
        ORDER BY i.issue_date DESC, i.id DESC`,
     )
-    .all(...params);
+    .all(workspaceId, ...params);
 }
 
 export interface InvoiceInput {

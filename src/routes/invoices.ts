@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import type { Env } from "../auth";
-import { getClient, getInvoice, getWorkspace, invoiceTotal, lineItems, workspaceClients, type Invoice } from "../db";
+import { databaseGeneration, getClient, getInvoice, getWorkspace, invoiceTotal, lineItems, workspaceClients, workspaceVersion, type Invoice } from "../db";
 import { toCsv } from "../lib/csv";
 import {
   blankForm,
@@ -131,12 +131,27 @@ invoiceRoutes.get("/invoices", (c) => {
   return c.html(page({ title: "Invoices", user, csrf: c.get("csrf"), section: "invoices", body, flash }));
 });
 
-invoiceRoutes.get("/invoices/export.csv", (c) => {
-  const user = c.get("user");
-  const status = parseStatusFilter(c.req.query("status"));
-  const q = parseSearch(c.req.query("q"));
-  const now = today();
-  const rows = exportInvoices(user.workspace_id, status, q);
+/**
+ * Built CSV files, keyed by workspace, filter, search and day, and tagged with
+ * the workspace's change counter. Any write to the workspace's invoices, line
+ * items or clients bumps the counter (database triggers), so a stale file is
+ * never served; repeated downloads of unchanged data skip the query and the
+ * CSV building. Bounded so many different searches cannot grow it without limit.
+ */
+const EXPORT_CACHE_MAX = 200;
+const exportCache = new Map<string, { generation: number; version: number; body: Uint8Array }>();
+
+function exportCsv(workspaceId: number, status: StatusFilter, q: string, now: string): Uint8Array {
+  const key = JSON.stringify([workspaceId, status, q, now]);
+  const generation = databaseGeneration();
+  const version = workspaceVersion(workspaceId);
+  const hit = exportCache.get(key);
+  if (hit && hit.generation === generation && hit.version === version) {
+    exportCache.delete(key); // move to the newest end (LRU order)
+    exportCache.set(key, hit);
+    return hit.body;
+  }
+  const rows = exportInvoices(workspaceId, status, q);
   const csv = toCsv([
     ["Number", "Client", "Status", "Issue date", "Due date", "Paid date", "Reference", "Line items", "Total (EUR)", "Notes"],
     ...rows.map((r) => [
@@ -152,8 +167,21 @@ invoiceRoutes.get("/invoices/export.csv", (c) => {
       r.notes,
     ]),
   ]);
+  const body = new TextEncoder().encode(csv);
+  exportCache.delete(key);
+  exportCache.set(key, { generation, version, body });
+  while (exportCache.size > EXPORT_CACHE_MAX) exportCache.delete(exportCache.keys().next().value!);
+  return body;
+}
+
+invoiceRoutes.get("/invoices/export.csv", (c) => {
+  const user = c.get("user");
+  const status = parseStatusFilter(c.req.query("status"));
+  const q = parseSearch(c.req.query("q"));
+  const now = today();
+  const body = exportCsv(user.workspace_id, status, q, now);
   const name = `invoices-${status === "all" ? "" : status + "-"}${now}.csv`;
-  return c.body(csv, 200, {
+  return c.body(body, 200, {
     "Content-Type": "text/csv; charset=utf-8",
     "Content-Disposition": `attachment; filename="${name}"`,
   });

@@ -150,6 +150,40 @@ const LATE_INDEXES = `
 CREATE UNIQUE INDEX IF NOT EXISTS invoices_share_token ON invoices (share_token) WHERE share_token IS NOT NULL;
 `;
 
+/**
+ * A per-workspace change counter kept by triggers, so every write to a
+ * workspace's invoices, line items or clients (from any code path or process)
+ * is visible to caches as a new version number.
+ */
+const VERSION_SCHEMA = `
+CREATE TABLE IF NOT EXISTS workspace_versions (
+  workspace_id INTEGER PRIMARY KEY,
+  version INTEGER NOT NULL DEFAULT 0
+);
+${(["INSERT", "UPDATE", "DELETE"] as const)
+  .flatMap((op) => {
+    const row = op === "DELETE" ? "OLD" : "NEW";
+    const bump = (ws: string) =>
+      `INSERT INTO workspace_versions (workspace_id, version) VALUES (${ws}, 1)
+       ON CONFLICT (workspace_id) DO UPDATE SET version = version + 1;`;
+    const t = op.toLowerCase();
+    return [
+      `CREATE TRIGGER IF NOT EXISTS invoices_version_${t} AFTER ${op} ON invoices BEGIN
+         ${bump(`${row}.workspace_id`)}
+         ${op === "UPDATE" ? bump("OLD.workspace_id") : ""}
+       END;`,
+      `CREATE TRIGGER IF NOT EXISTS clients_version_${t} AFTER ${op} ON clients BEGIN
+         ${bump(`${row}.workspace_id`)}
+       END;`,
+      `CREATE TRIGGER IF NOT EXISTS line_items_version_${t} AFTER ${op} ON line_items
+       WHEN EXISTS (SELECT 1 FROM invoices WHERE id = ${row}.invoice_id) BEGIN
+         ${bump(`(SELECT workspace_id FROM invoices WHERE id = ${row}.invoice_id)`)}
+       END;`,
+    ];
+  })
+  .join("\n")}
+`;
+
 function applySchema(d: Database): void {
   d.exec(SCHEMA);
   for (const { table, column, ddl } of ADDED_COLUMNS) {
@@ -157,6 +191,22 @@ function applySchema(d: Database): void {
     if (!cols.some((c) => c.name === column)) d.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
   }
   d.exec(LATE_INDEXES);
+  d.exec(VERSION_SCHEMA);
+  dbGeneration++;
+}
+
+/** Changes whenever a database is opened or its schema reset, so caches never outlive their data. */
+let dbGeneration = 0;
+export function databaseGeneration(): number {
+  return dbGeneration;
+}
+
+/** Current change counter of a workspace's invoices, line items and clients. */
+export function workspaceVersion(workspaceId: number): number {
+  const row = getDb()
+    .query<{ version: number }, [number]>("SELECT version FROM workspace_versions WHERE workspace_id = ?")
+    .get(workspaceId);
+  return row?.version ?? 0;
 }
 
 let db: Database | null = null;
@@ -182,7 +232,7 @@ export function getDb(): Database {
 export function resetSchema(): void {
   const d = getDb();
   d.exec("PRAGMA foreign_keys = OFF");
-  for (const t of ["line_items", "invoices", "clients", "sessions", "users", "workspaces"]) {
+  for (const t of ["workspace_versions", "line_items", "invoices", "clients", "sessions", "users", "workspaces"]) {
     d.exec(`DROP TABLE IF EXISTS ${t}`);
   }
   d.exec("PRAGMA foreign_keys = ON");
