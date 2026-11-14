@@ -1,0 +1,9 @@
+install: bun install
+seed: bun run seed            # reads DATABASE_PATH and SEED (small | large)
+start: bun run start          # reads PORT and DATABASE_PATH
+ready: /healthz               # 200 when up
+accounts:                     # exist after seeding; two different workspaces so one can attack the other
+  - { name: alice, workspace: Nordlys Studio, email: alice@nordlys.test, password: crashtest-alice }
+  - { name: bob,   workspace: Harbour & Co,   email: bob@harbour.test,   password: crashtest-bob }
+login: { path: /login, email: 'input[name=email]', password: 'input[name=password]', submit: 'button[type=submit]' }
+load: { users: [10, 50, 200], seconds: 15, p95Ms: 500, errorRate: 0.01, slowdown: 2 }
