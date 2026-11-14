@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: craci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - name: Start on small seed and check /healthz
+        env:
+          DATABASE_PATH: ${{ runner.temp }}/kuitti.db
+          SEED: small
+          PORT: "3000"
+        run: |
+          bun run seed
+          bun run start > "$RUNNER_TEMP/kuitti.log" 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:$PORT/healthz"; then echo; exit 0; fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/kuitti.log"
+          exit 1
