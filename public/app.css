@@ -243,6 +243,23 @@ input.num { text-align: right; }
 .total-label { text-align: right; }
 .total-value { font-size: 18px; }
 .paper-foot { padding-top: 22px; margin-top: 8px; border-top: 1px dashed var(--line); }
+.paper-notes { padding: 20px 0 4px; max-width: 60ch; }
+.pre-wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Invoice list search */
+.list-search { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.list-search input[type="search"] { flex: 1 1 260px; max-width: 420px; }
+.list-search .export-link { margin-left: auto; }
+
+/* Share link */
+.share-card h2 { margin: 0; }
+.share-card p { margin: 0 0 12px; }
+.share-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.share-row form { margin: 0; }
+.share-url { flex: 1 1 320px; font-size: 13px; color: var(--ink-2); background: var(--bg-soft); }
+.share-wrap { max-width: 860px; margin: 0 auto; padding: 28px 16px 48px; }
+.share-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+.share-head .logo { padding: 0; }
 
 .members { list-style: none; margin: 0; padding: 0; }
 .members li { display: flex; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }

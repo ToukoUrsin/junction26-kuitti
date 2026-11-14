@@ -1,6 +1,6 @@
 # Kuitti
 
-Kuitti is a small invoicing app for small teams. Each company has its own workspace with clients, invoices and line items. You can see what is outstanding, overdue and paid, create and edit invoices, mark them paid, and keep client and company details in one place.
+Kuitti is a small invoicing app for small teams. Each company has its own workspace with clients, invoices and line items. You can see what is outstanding, overdue and paid, create and edit invoices, mark them paid, and keep client and company details in one place. Invoices can be searched by client or number, exported to CSV, carry free-text notes, and be shared with a client through a revocable read-only link (`/share/<token>`, no sign-in).
 
 Built with [Bun](https://bun.sh), [Hono](https://hono.dev) and `bun:sqlite`. Pages are rendered on the server; a small JSON API under `/api/` backs a few actions on the pages (mark paid, mark sent, delete). There is no build step.
 
@@ -33,7 +33,7 @@ Seeding wipes and recreates the database at `DATABASE_PATH`. The same `SEED` and
 bun test
 ```
 
-The suite runs against an in-memory database with the small seed and covers sign-in, sessions and CSRF, workspace isolation, invoices and clients.
+The suite runs against an in-memory database with the small seed and covers sign-in, sessions and CSRF, workspace isolation, invoices and clients, search, notes, share links, CSV export and the schema upgrade.
 
 ## Layout
 
@@ -43,8 +43,9 @@ src/app.ts           routes, security headers, error pages
 src/auth.ts          sessions, CSRF, password hashing, sign-in throttling
 src/db.ts            schema and row helpers
 src/lib/             formatting, validation, invoice queries
-src/routes/          dashboard, invoices, clients, settings, sign-in, JSON API
+src/routes/          dashboard, invoices, clients, settings, sign-in, JSON API, public share pages
 src/views/layout.ts  page shell
+src/views/invoice.ts invoice document (invoice page and share page)
 public/              app.css, app.js, font
 scripts/seed.ts      demo data
 test/                bun test suite
