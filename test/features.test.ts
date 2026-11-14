@@ -186,6 +186,38 @@ describe("notes", () => {
     const got = (await (await alice.api(`/api/invoices/${nordlys.invoice}`)).json()) as { notes: string };
     expect(got.notes).toBe("new");
   });
+
+  test("a note over 2000 characters is refused with a message, never cut", async () => {
+    const long = "x".repeat(2001);
+    const before = getDb().query<{ n: number }, []>("SELECT COUNT(*) AS n FROM invoices").get()!.n;
+    const res = await alice.form("/invoices", fields({ notes: long }));
+    expect(res.status).toBe(422);
+    const html = await res.text();
+    expect(html).toContain("Notes can be at most 2000 characters");
+    expect(html).toContain(`${long}</textarea>`); // what the user typed is kept on the page
+    expect(getDb().query<{ n: number }, []>("SELECT COUNT(*) AS n FROM invoices").get()!.n).toBe(before);
+
+    getDb().query("UPDATE invoices SET notes = 'keep me' WHERE id = ?").run(nordlys.invoice);
+    const edit = await alice.form(`/invoices/${nordlys.invoice}`, fields({ notes: long }));
+    expect(edit.status).toBe(422);
+    expect(await edit.text()).toContain("Notes can be at most 2000 characters");
+    expect(getInvoice(nordlys.invoice)!.notes).toBe("keep me");
+
+    const api = await alice.api(`/api/invoices/${nordlys.invoice}`, "PUT", {
+      client_id: nordlys.client,
+      issue_date: "2026-11-01",
+      due_date: "2026-11-15",
+      items: [{ description: "Work", quantity: 1, unit_price: "100" }],
+      notes: long,
+    });
+    expect(api.status).toBe(422);
+    expect(((await api.json()) as { messages: string[] }).messages.join(" ")).toContain("Notes can be at most 2000 characters");
+    expect(getInvoice(nordlys.invoice)!.notes).toBe("keep me");
+
+    const res2 = await alice.form("/invoices", fields({ notes: "y".repeat(2000) }));
+    const id = Number(/\/invoices\/(\d+)/.exec(res2.headers.get("location")!)![1]);
+    expect(getInvoice(id)!.notes).toBe("y".repeat(2000));
+  });
 });
 
 describe("share links", () => {
@@ -320,6 +352,22 @@ describe("CSV export", () => {
     const anon = await new Client().get("/invoices/export.csv");
     expect(anon.status).toBe(302);
     expect(anon.headers.get("location")).toStartWith("/login");
+  });
+
+  test("a CSV file built for one workspace is never given to another", async () => {
+    // Same change counter in both workspaces, so only the workspace in the cache key keeps them apart.
+    getDb().query("UPDATE workspace_versions SET version = 7").run();
+    const own = parseCsv(await (await alice.get("/invoices/export.csv")).text());
+    expect(own.slice(1).every((r) => r[0]!.startsWith("NS-"))).toBe(true);
+    const other = parseCsv(await (await bob.get("/invoices/export.csv")).text());
+    expect(other.length).toBeGreaterThan(1);
+    expect(other.slice(1).every((r) => r[0]!.startsWith("HC-"))).toBe(true);
+    // And the other way round, with a search and filter both use.
+    const bobPaid = parseCsv(await (await bob.get("/invoices/export.csv?status=paid&q=-10")).text());
+    expect(bobPaid.slice(1).every((r) => r[0]!.startsWith("HC-"))).toBe(true);
+    const alicePaid = parseCsv(await (await alice.get("/invoices/export.csv?status=paid&q=-10")).text());
+    expect(alicePaid.length).toBeGreaterThan(1);
+    expect(alicePaid.slice(1).every((r) => r[0]!.startsWith("NS-"))).toBe(true);
   });
 });
 

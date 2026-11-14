@@ -224,9 +224,9 @@ export interface InvoiceForm {
   items: { description: string; quantity: string; unit_price: string }[];
 }
 
-/** Free text from a textarea or JSON: normalised line endings, bounded length. */
+/** Free text from a textarea or JSON: normalised line endings. Length is checked in validateInvoice, never cut. */
 export function readNotes(v: unknown): string {
-  return typeof v === "string" ? v.replace(/\r\n?/g, "\n").trim().slice(0, MAX_NOTES) : "";
+  return typeof v === "string" ? v.replace(/\r\n?/g, "\n").trim() : "";
 }
 
 function asList(v: unknown): unknown[] {
@@ -277,6 +277,9 @@ export function validateInvoice(
   if (!isDate(form.due_date)) errors.push("Due date is not a valid date.");
   if (isDate(form.issue_date) && isDate(form.due_date) && form.due_date < form.issue_date) {
     errors.push("Due date cannot be before the issue date.");
+  }
+  if (form.notes !== null && form.notes.length > MAX_NOTES) {
+    errors.push(`Notes can be at most ${MAX_NOTES} characters (yours has ${form.notes.length}).`);
   }
   const filled = form.items.filter((it) => it.description || it.quantity || it.unit_price);
   if (filled.length === 0) errors.push("Add at least one line item.");
