@@ -5,6 +5,7 @@ import {
   createInvoice,
   deleteInvoice,
   listInvoices,
+  parseSearch,
   parseStatusFilter,
   readInvoiceForm,
   setStatus,
@@ -34,7 +35,12 @@ apiRoutes.get("/me", (c) => {
 
 apiRoutes.get("/invoices", (c) => {
   const user = c.get("user");
-  const res = listInvoices(user.workspace_id, parseStatusFilter(c.req.query("status")), toInt(c.req.query("page")) ?? 1);
+  const res = listInvoices(
+    user.workspace_id,
+    parseStatusFilter(c.req.query("status")),
+    toInt(c.req.query("page")) ?? 1,
+    parseSearch(c.req.query("q")),
+  );
   return c.json({
     page: res.page,
     pages: res.pages,
@@ -46,6 +52,7 @@ apiRoutes.get("/invoices", (c) => {
       status: displayStatus(r),
       issue_date: r.issue_date,
       due_date: r.due_date,
+      line_items: r.line_count,
       total_cents: r.total,
     })),
   });
@@ -76,6 +83,7 @@ apiRoutes.get("/invoices/:id", (c) => {
     due_date: invoice.due_date,
     paid_at: invoice.paid_at,
     reference: invoice.reference,
+    notes: invoice.notes,
     client: { id: client.id, name: client.name },
     items: lineItems(invoice.id).map((li) => ({
       description: li.description,

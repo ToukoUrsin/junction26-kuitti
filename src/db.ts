@@ -48,6 +48,8 @@ export interface Invoice {
   due_date: string;
   paid_at: string | null;
   reference: string;
+  notes: string;
+  share_token: string | null;
   created_at: string;
 }
 
@@ -112,6 +114,8 @@ CREATE TABLE IF NOT EXISTS invoices (
   due_date TEXT NOT NULL,
   paid_at TEXT,
   reference TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  share_token TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (workspace_id, seq)
 );
@@ -135,6 +139,26 @@ CREATE INDEX IF NOT EXISTS invoices_client ON invoices (client_id);
 CREATE INDEX IF NOT EXISTS line_items_invoice ON line_items (invoice_id, position);
 `;
 
+/** Columns added after the first release. Databases created earlier get them through ALTER TABLE. */
+const ADDED_COLUMNS: { table: string; column: string; ddl: string }[] = [
+  { table: "invoices", column: "notes", ddl: "notes TEXT NOT NULL DEFAULT ''" },
+  { table: "invoices", column: "share_token", ddl: "share_token TEXT" },
+];
+
+// Indexes on added columns; created once the columns exist.
+const LATE_INDEXES = `
+CREATE UNIQUE INDEX IF NOT EXISTS invoices_share_token ON invoices (share_token) WHERE share_token IS NOT NULL;
+`;
+
+function applySchema(d: Database): void {
+  d.exec(SCHEMA);
+  for (const { table, column, ddl } of ADDED_COLUMNS) {
+    const cols = d.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
+    if (!cols.some((c) => c.name === column)) d.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+  d.exec(LATE_INDEXES);
+}
+
 let db: Database | null = null;
 
 export function openDb(path = process.env.DATABASE_PATH ?? "data/kuitti.db"): Database {
@@ -147,7 +171,7 @@ export function openDb(path = process.env.DATABASE_PATH ?? "data/kuitti.db"): Da
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = NORMAL");
   }
-  db.exec(SCHEMA);
+  applySchema(db);
   return db;
 }
 
@@ -162,7 +186,7 @@ export function resetSchema(): void {
     d.exec(`DROP TABLE IF EXISTS ${t}`);
   }
   d.exec("PRAGMA foreign_keys = ON");
-  d.exec(SCHEMA);
+  applySchema(d);
 }
 
 /** Amount of one line in cents. Quantities may be fractional (hours). */

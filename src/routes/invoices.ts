@@ -1,12 +1,20 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { Env } from "../auth";
-import { getClient, getInvoice, getWorkspace, invoiceTotal, lineItems, workspaceClients } from "../db";
+import { getClient, getInvoice, getWorkspace, invoiceTotal, lineItems, workspaceClients, type Invoice } from "../db";
+import { toCsv } from "../lib/csv";
 import {
   blankForm,
   createInvoice,
+  enableShare,
+  exportInvoices,
   listInvoices,
+  MAX_NOTES,
+  MAX_SEARCH,
+  PAGE_SIZE,
+  parseSearch,
   parseStatusFilter,
   readInvoiceForm,
+  revokeShare,
   STATUS_FILTERS,
   updateInvoice,
   validateInvoice,
@@ -14,6 +22,7 @@ import {
   type StatusFilter,
 } from "../lib/invoices";
 import { displayStatus, esc, fmtDate, money, parseMoney, parseQuantity, statusBadge, today, toInt } from "../lib/util";
+import { invoicePaper } from "../views/invoice";
 import { errorPage, page } from "../views/layout";
 
 export const invoiceRoutes = new Hono<Env>();
@@ -30,69 +39,124 @@ const FLASH: Record<string, string> = {
   created: "Invoice created.",
   saved: "Changes saved.",
   deleted: "Invoice deleted.",
+  shared: "Share link created.",
+  unshared: "Share link revoked. The old link no longer works.",
 };
 
-function listHref(status: StatusFilter, pageNo: number): string {
-  const q = new URLSearchParams();
-  if (status !== "all") q.set("status", status);
-  if (pageNo > 1) q.set("page", String(pageNo));
-  const s = q.toString();
+function listQuery(status: StatusFilter, q: string, pageNo = 1): string {
+  const p = new URLSearchParams();
+  if (q) p.set("q", q);
+  if (status !== "all") p.set("status", status);
+  if (pageNo > 1) p.set("page", String(pageNo));
+  return p.toString();
+}
+
+function listHref(status: StatusFilter, q: string, pageNo: number): string {
+  const s = listQuery(status, q, pageNo);
   return s ? `/invoices?${s}` : "/invoices";
+}
+
+function exportHref(status: StatusFilter, q: string): string {
+  const s = listQuery(status, q);
+  return s ? `/invoices/export.csv?${s}` : "/invoices/export.csv";
 }
 
 invoiceRoutes.get("/invoices", (c) => {
   const user = c.get("user");
   const status = parseStatusFilter(c.req.query("status"));
+  const q = parseSearch(c.req.query("q"));
   const pageNo = toInt(c.req.query("page")) ?? 1;
-  const res = listInvoices(user.workspace_id, status, pageNo);
+  const res = listInvoices(user.workspace_id, status, pageNo, q);
   const now = today();
 
   const tabs = STATUS_FILTERS.map(
     (s) =>
-      `<a href="${listHref(s, 1)}" class="tab${s === status ? " active" : ""}"${s === status ? ' aria-current="true"' : ""}>${FILTER_LABEL[s]} <span class="tab-count">${res.counts[s]}</span></a>`,
+      `<a href="${esc(listHref(s, q, 1))}" class="tab${s === status ? " active" : ""}"${s === status ? ' aria-current="true"' : ""}>${FILTER_LABEL[s]} <span class="tab-count">${res.counts[s]}</span></a>`,
   ).join("");
 
+  const what = `${status === "all" ? "" : FILTER_LABEL[status].toLowerCase() + " "}invoices`;
+  const empty = q
+    ? `No ${what} match “${esc(q)}”. <a href="${esc(listHref(status, "", 1))}">Clear search</a>`
+    : `No ${what}.`;
   const rows = res.rows.length
     ? res.rows
         .map(
           (r) => `<tr class="row-link" data-href="/invoices/${r.id}">
       <td class="hide-sm"><a href="/invoices/${r.id}" class="strong">${esc(r.number)}</a></td>
-      <td><a href="/invoices/${r.id}" class="strong show-sm">${esc(r.client_name)}</a><span class="hide-sm">${esc(r.client_name)}</span><span class="muted small show-sm">${esc(r.number)}</span></td>
+      <td><a href="/invoices/${r.id}" class="strong show-sm">${esc(r.client_name)}</a><span class="hide-sm">${esc(r.client_name)}</span><span class="muted small show-sm">${esc(r.number)} · ${r.line_count} ${r.line_count === 1 ? "item" : "items"}</span></td>
       <td>${statusBadge(displayStatus(r, now))}</td>
       <td class="hide-sm">${esc(fmtDate(r.due_date))}</td>
+      <td class="num hide-sm line-count">${r.line_count}</td>
       <td class="num">${esc(money(r.total))}</td>
     </tr>`,
         )
         .join("")
-    : `<tr><td colspan="5" class="empty-cell">No ${status === "all" ? "" : FILTER_LABEL[status].toLowerCase() + " "}invoices.</td></tr>`;
+    : `<tr><td colspan="6" class="empty-cell">${empty}</td></tr>`;
 
-  const from = res.total === 0 ? 0 : (res.page - 1) * 25 + 1;
-  const to = Math.min(res.page * 25, res.total);
+  const from = res.total === 0 ? 0 : (res.page - 1) * PAGE_SIZE + 1;
+  const to = Math.min(res.page * PAGE_SIZE, res.total);
   const pager = `<nav class="pager" aria-label="Pages">
     <span class="muted small">${from}–${to} of ${res.total}</span>
     <span class="pager-buttons">
-      ${res.page > 1 ? `<a class="btn btn-small" href="${listHref(status, res.page - 1)}" rel="prev">Previous</a>` : `<span class="btn btn-small disabled" aria-disabled="true">Previous</span>`}
+      ${res.page > 1 ? `<a class="btn btn-small" href="${esc(listHref(status, q, res.page - 1))}" rel="prev">Previous</a>` : `<span class="btn btn-small disabled" aria-disabled="true">Previous</span>`}
       <span class="small muted">Page ${res.page} of ${res.pages}</span>
-      ${res.page < res.pages ? `<a class="btn btn-small" href="${listHref(status, res.page + 1)}" rel="next">Next</a>` : `<span class="btn btn-small disabled" aria-disabled="true">Next</span>`}
+      ${res.page < res.pages ? `<a class="btn btn-small" href="${esc(listHref(status, q, res.page + 1))}" rel="next">Next</a>` : `<span class="btn btn-small disabled" aria-disabled="true">Next</span>`}
     </span>
   </nav>`;
+
+  const search = `<form method="get" action="/invoices" class="list-search" role="search">
+    ${status !== "all" ? `<input type="hidden" name="status" value="${esc(status)}">` : ""}
+    <input type="search" name="q" value="${esc(q)}" placeholder="Search client or invoice number" aria-label="Search invoices" maxlength="${MAX_SEARCH}">
+    <button type="submit" class="btn">Search</button>
+    ${q ? `<a class="btn btn-ghost" href="${esc(listHref(status, "", 1))}">Clear</a>` : ""}
+    <a class="btn btn-ghost export-link" href="${esc(exportHref(status, q))}" download>Export CSV</a>
+  </form>`;
 
   const flash = FLASH[c.req.query("done") ?? ""];
   const body = `
   <header class="page-head">
-    <div><h1>Invoices</h1><p class="muted">${res.counts.all} invoices in ${esc(user.workspace_name)}</p></div>
+    <div><h1>Invoices</h1><p class="muted">${q ? `${res.counts.all} matching “${esc(q)}”` : `${res.counts.all} invoices`} in ${esc(user.workspace_name)}</p></div>
     <a href="/invoices/new" class="btn btn-primary">New invoice</a>
   </header>
+  ${search}
   <div class="tabs" role="navigation" aria-label="Filter by status">${tabs}</div>
   <section class="card card-flush">
     <table class="table" id="invoice-table">
-      <thead><tr><th class="hide-sm">Number</th><th>Client</th><th>Status</th><th class="hide-sm">Due date</th><th class="num">Total</th></tr></thead>
+      <thead><tr><th class="hide-sm">Number</th><th>Client</th><th>Status</th><th class="hide-sm">Due date</th><th class="num hide-sm">Items</th><th class="num">Total</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
   </section>
   ${pager}`;
 
   return c.html(page({ title: "Invoices", user, csrf: c.get("csrf"), section: "invoices", body, flash }));
+});
+
+invoiceRoutes.get("/invoices/export.csv", (c) => {
+  const user = c.get("user");
+  const status = parseStatusFilter(c.req.query("status"));
+  const q = parseSearch(c.req.query("q"));
+  const now = today();
+  const rows = exportInvoices(user.workspace_id, status, q);
+  const csv = toCsv([
+    ["Number", "Client", "Status", "Issue date", "Due date", "Paid date", "Reference", "Line items", "Total (EUR)", "Notes"],
+    ...rows.map((r) => [
+      r.number,
+      r.client_name,
+      displayStatus(r, now),
+      r.issue_date,
+      r.due_date,
+      r.paid_at ?? "",
+      r.reference,
+      r.line_count,
+      (r.total / 100).toFixed(2),
+      r.notes,
+    ]),
+  ]);
+  const name = `invoices-${status === "all" ? "" : status + "-"}${now}.csv`;
+  return c.body(csv, 200, {
+    "Content-Type": "text/csv; charset=utf-8",
+    "Content-Disposition": `attachment; filename="${name}"`,
+  });
 });
 
 function invoiceFormView(opts: {
@@ -138,6 +202,7 @@ function invoiceFormView(opts: {
         <label class="field"><span>Issue date</span><input type="date" name="issue_date" value="${esc(form.issue_date)}" required></label>
         <label class="field"><span>Due date</span><input type="date" name="due_date" value="${esc(form.due_date)}" required></label>
         <label class="field span-2"><span>Reference <em class="muted">optional</em></span><input name="reference" value="${esc(form.reference)}" placeholder="PO number or project name" maxlength="120"></label>
+        <label class="field span-2"><span>Notes <em class="muted">optional, shown on the invoice and its share link</em></span><textarea name="notes" rows="3" maxlength="${MAX_NOTES}" placeholder="Payment instructions, thanks, delivery details…">${esc(form.notes ?? "")}</textarea></label>
       </div>
     </section>
     <section class="card card-flush">
@@ -212,17 +277,30 @@ invoiceRoutes.get("/invoices/:id", (c) => {
   const items = lineItems(invoice.id);
   const total = invoiceTotal(invoice.id);
   const status = displayStatus(invoice);
+  const csrf = c.get("csrf");
 
-  const lines = items
-    .map(
-      (li) => `<tr>
-      <td>${esc(li.description)}</td>
-      <td class="num">${esc(String(li.quantity))}</td>
-      <td class="num hide-sm">${esc(money(li.unit_price))}</td>
-      <td class="num">${esc(money(Math.round(li.quantity * li.unit_price)))}</td>
-    </tr>`,
-    )
-    .join("");
+  const shareUrl = invoice.share_token ? `${new URL(c.req.url).origin}/share/${invoice.share_token}` : "";
+  const share = invoice.share_token
+    ? `<section class="card share-card" id="share">
+      <div class="card-head"><h2>Share link</h2><span class="badge badge-sent">Active</span></div>
+      <p class="muted small">Anyone with this link can view this invoice without signing in. Revoke it to turn the link off.</p>
+      <div class="share-row">
+        <input type="text" readonly value="${esc(shareUrl)}" aria-label="Share link" id="share-url" class="share-url">
+        <button type="button" class="btn" data-copy="#share-url">Copy</button>
+        <form method="post" action="/invoices/${invoice.id}/share/revoke">
+          <input type="hidden" name="_csrf" value="${esc(csrf)}">
+          <button type="submit" class="btn btn-danger-ghost">Revoke link</button>
+        </form>
+      </div>
+    </section>`
+    : `<section class="card share-card" id="share">
+      <div class="card-head"><h2>Share link</h2></div>
+      <p class="muted small">Create a link your client can open without an account. They see a read-only copy of this invoice, including its notes.</p>
+      <form method="post" action="/invoices/${invoice.id}/share">
+        <input type="hidden" name="_csrf" value="${esc(csrf)}">
+        <button type="submit" class="btn">Create share link</button>
+      </form>
+    </section>`;
 
   const actions = [
     invoice.status === "draft"
@@ -247,40 +325,36 @@ invoiceRoutes.get("/invoices/:id", (c) => {
   </header>
   <p class="api-error alert" role="alert" hidden></p>
 
-  <article class="card invoice-paper">
-    <div class="paper-head">
-      <div>
-        <div class="paper-from strong">${esc(ws.legal_name || ws.name)}</div>
-        <div class="muted small pre">${esc(ws.address)}</div>
-        ${ws.vat_id ? `<div class="muted small">VAT ${esc(ws.vat_id)}</div>` : ""}
-      </div>
-      <div class="paper-title">
-        <div class="eyebrow">Invoice</div>
-        <div class="paper-number">${esc(invoice.number)}</div>
-      </div>
-    </div>
-    <div class="paper-meta">
-      <div><div class="eyebrow">Billed to</div><div class="strong">${esc(client.name)}</div>
-        ${client.contact_name ? `<div class="small">${esc(client.contact_name)}</div>` : ""}
-        <div class="muted small pre">${esc(client.address)}</div>
-        ${client.vat_id ? `<div class="muted small">VAT ${esc(client.vat_id)}</div>` : ""}
-      </div>
-      <dl class="meta-list">
-        <div><dt>Issued</dt><dd>${esc(fmtDate(invoice.issue_date))}</dd></div>
-        <div><dt>Due</dt><dd>${esc(fmtDate(invoice.due_date))}</dd></div>
-        ${invoice.paid_at ? `<div><dt>Paid</dt><dd>${esc(fmtDate(invoice.paid_at))}</dd></div>` : ""}
-        ${invoice.reference ? `<div><dt>Reference</dt><dd>${esc(invoice.reference)}</dd></div>` : ""}
-      </dl>
-    </div>
-    <table class="table paper-lines">
-      <thead><tr><th>Description</th><th class="num">Qty</th><th class="num hide-sm">Unit price</th><th class="num">Amount</th></tr></thead>
-      <tbody>${lines}</tbody>
-      <tfoot><tr><td colspan="2" class="hide-sm"></td><td class="strong total-label">Total</td><td class="num strong total-value">${esc(money(total))}</td></tr></tfoot>
-    </table>
-    ${ws.iban ? `<div class="paper-foot muted small">Pay to ${esc(ws.iban)} · reference ${esc(invoice.number)}</div>` : ""}
-  </article>`;
+  ${invoicePaper({ invoice, client, workspace: ws, items, total })}
+  ${share}`;
 
-  return c.html(page({ title: invoice.number, user, csrf: c.get("csrf"), section: "invoices", body, flash }));
+  return c.html(page({ title: invoice.number, user, csrf, section: "invoices", body, flash }));
+});
+
+/** The signed-in user's invoice, or an error response (404 missing, 403 other workspace). */
+function ownInvoice(c: Context<Env>): { invoice: Invoice } | { error: Response } {
+  const user = c.get("user");
+  const id = toInt(c.req.param("id"));
+  const invoice = id ? getInvoice(id) : null;
+  if (!invoice) return { error: c.html(errorPage(404, "Invoice not found", "This invoice does not exist or was deleted.", user, c.get("csrf")), 404) };
+  if (invoice.workspace_id !== user.workspace_id) {
+    return { error: c.html(errorPage(403, "No access", "This invoice belongs to another workspace.", user, c.get("csrf")), 403) };
+  }
+  return { invoice };
+}
+
+invoiceRoutes.post("/invoices/:id/share", (c) => {
+  const r = ownInvoice(c);
+  if ("error" in r) return r.error;
+  enableShare(r.invoice.id);
+  return c.redirect(`/invoices/${r.invoice.id}?done=shared#share`);
+});
+
+invoiceRoutes.post("/invoices/:id/share/revoke", (c) => {
+  const r = ownInvoice(c);
+  if ("error" in r) return r.error;
+  revokeShare(r.invoice.id);
+  return c.redirect(`/invoices/${r.invoice.id}?done=unshared#share`);
 });
 
 invoiceRoutes.get("/invoices/:id/edit", (c) => {
@@ -296,6 +370,7 @@ invoiceRoutes.get("/invoices/:id/edit", (c) => {
     issue_date: invoice.issue_date,
     due_date: invoice.due_date,
     reference: invoice.reference,
+    notes: invoice.notes,
     items: lineItems(invoice.id).map((li) => ({
       description: li.description,
       quantity: String(li.quantity),

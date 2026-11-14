@@ -8,6 +8,7 @@ import { clientRoutes } from "./routes/clients";
 import { dashboardRoutes } from "./routes/dashboard";
 import { invoiceRoutes } from "./routes/invoices";
 import { settingsRoutes } from "./routes/settings";
+import { shareRoutes } from "./routes/share";
 import { errorPage } from "./views/layout";
 
 const CSP = [
@@ -55,6 +56,7 @@ export function createApp(): Hono<Env> {
 
   app.route("/", authRoutes);
   app.route("/api", apiRoutes);
+  app.route("/", shareRoutes);
 
   app.use("/", requirePage);
   app.use("/invoices", requirePage);

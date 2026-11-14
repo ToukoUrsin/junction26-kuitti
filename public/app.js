@@ -42,6 +42,24 @@
       });
   });
 
+  // Copy buttons, e.g. for an invoice share link.
+  document.addEventListener("click", function (e) {
+    var btn = e.target.closest("button[data-copy]");
+    if (!btn) return;
+    var input = document.querySelector(btn.getAttribute("data-copy"));
+    if (!input) return;
+    input.select();
+    var done = function () {
+      btn.textContent = "Copied";
+      setTimeout(function () { btn.textContent = "Copy"; }, 2000);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(input.value).then(done, function () {});
+    } else if (document.execCommand && document.execCommand("copy")) {
+      done();
+    }
+  });
+
   // Invoice form: add and remove line items, live totals.
   var form = document.getElementById("invoice-form");
   if (!form) return;
