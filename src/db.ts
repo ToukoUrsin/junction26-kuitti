@@ -148,6 +148,8 @@ const ADDED_COLUMNS: { table: string; column: string; ddl: string }[] = [
 // Indexes on added columns; created once the columns exist.
 const LATE_INDEXES = `
 CREATE UNIQUE INDEX IF NOT EXISTS invoices_share_token ON invoices (share_token) WHERE share_token IS NOT NULL;
+-- Covers the invoice search scan (list order plus everything it filters and counts on), so it never reads table rows.
+CREATE INDEX IF NOT EXISTS invoices_workspace_search ON invoices (workspace_id, issue_date DESC, id DESC, number, client_id, status, due_date);
 `;
 
 /**

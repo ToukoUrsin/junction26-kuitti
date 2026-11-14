@@ -52,7 +52,7 @@ type Param = string | number;
 /** Matches client name or invoice number, case-insensitively (ASCII), as a substring. */
 function searchClause(q: string): { sql: string; params: Param[] } {
   if (!q) return { sql: "", params: [] };
-  const pattern = `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+  const pattern = likePattern(q);
   return { sql: " AND (c.name LIKE ? ESCAPE '\\' OR i.number LIKE ? ESCAPE '\\')", params: [pattern, pattern] };
 }
 
@@ -71,41 +71,52 @@ function filterClause(workspaceId: number, status: StatusFilter, q: string, now:
   return { sql: sql + s.sql, params: [...params, ...s.params] };
 }
 
+/** LIKE pattern matching `q` as a literal substring. */
+function likePattern(q: string): string {
+  return `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+}
+
+const LIST_COLUMNS = `i.id, i.number, i.status, i.issue_date, i.due_date, i.client_id, c.name AS client_name,
+              (SELECT COALESCE(SUM(${LINE_AMOUNT_SQL}), 0) FROM line_items li WHERE li.invoice_id = i.id) AS total,
+              (SELECT COUNT(*) FROM line_items li WHERE li.invoice_id = i.id) AS line_count`;
+
+function inStatus(r: { status: string; due_date: string }, status: StatusFilter, now: string): boolean {
+  if (status === "all") return true;
+  if (status === "overdue") return r.status === "sent" && r.due_date < now;
+  return r.status === status;
+}
+
 /** One page of a workspace's invoices, newest first, narrowed by status and search. */
 export function listInvoices(workspaceId: number, status: StatusFilter, pageNo: number, q = ""): ListResult {
+  return q ? searchInvoices(workspaceId, status, pageNo, q) : browseInvoices(workspaceId, status, pageNo);
+}
+
+function pageOf(total: number, pageNo: number): { page: number; pages: number } {
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  return { page: Math.min(Math.max(1, pageNo), pages), pages };
+}
+
+/** Unsearched list: counts from the status indexes, then one indexed page. */
+function browseInvoices(workspaceId: number, status: StatusFilter, pageNo: number): ListResult {
   const db = getDb();
   const now = today();
-  const { sql: where, params } = filterClause(workspaceId, status, q, now);
-
-  // Tab counts follow the search, so each tab shows how many matches it holds.
-  const s = searchClause(q);
+  const { sql: where, params } = filterClause(workspaceId, status, "", now);
   const c = db
-    .query<{ all_n: number; draft: number; sent: number; overdue: number; paid: number }, Param[]>(
+    .query<{ all_n: number; draft: number; sent: number; overdue: number; paid: number }, [string, number]>(
       `SELECT COUNT(*) AS all_n,
-              COUNT(CASE WHEN i.status = 'draft' THEN 1 END) AS draft,
-              COUNT(CASE WHEN i.status = 'sent' THEN 1 END) AS sent,
-              COUNT(CASE WHEN i.status = 'sent' AND i.due_date < ? THEN 1 END) AS overdue,
-              COUNT(CASE WHEN i.status = 'paid' THEN 1 END) AS paid
-       FROM invoices i ${q ? "JOIN clients c ON c.id = i.client_id" : ""}
-       WHERE i.workspace_id = ?${s.sql}`,
+              COUNT(CASE WHEN status = 'draft' THEN 1 END) AS draft,
+              COUNT(CASE WHEN status = 'sent' THEN 1 END) AS sent,
+              COUNT(CASE WHEN status = 'sent' AND due_date < ?1 THEN 1 END) AS overdue,
+              COUNT(CASE WHEN status = 'paid' THEN 1 END) AS paid
+       FROM invoices WHERE workspace_id = ?2`,
     )
-    .get(now, workspaceId, ...s.params)!;
-  const counts: Record<StatusFilter, number> = {
-    all: c.all_n,
-    draft: c.draft,
-    sent: c.sent,
-    overdue: c.overdue,
-    paid: c.paid,
-  };
+    .get(now, workspaceId)!;
+  const counts: Record<StatusFilter, number> = { all: c.all_n, draft: c.draft, sent: c.sent, overdue: c.overdue, paid: c.paid };
   const total = counts[status];
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const page = Math.min(Math.max(1, pageNo), pages);
-
+  const { page, pages } = pageOf(total, pageNo);
   const rows = db
     .query<ListRow, Param[]>(
-      `SELECT i.id, i.number, i.status, i.issue_date, i.due_date, i.client_id, c.name AS client_name,
-              (SELECT COALESCE(SUM(${LINE_AMOUNT_SQL}), 0) FROM line_items li WHERE li.invoice_id = i.id) AS total,
-              (SELECT COUNT(*) FROM line_items li WHERE li.invoice_id = i.id) AS line_count
+      `SELECT ${LIST_COLUMNS}
        FROM invoices i
        JOIN clients c ON c.id = i.client_id
        WHERE ${where}
@@ -113,7 +124,56 @@ export function listInvoices(workspaceId: number, status: StatusFilter, pageNo: 
        LIMIT ? OFFSET ?`,
     )
     .all(...params, PAGE_SIZE, (page - 1) * PAGE_SIZE);
+  return { rows, total, page, pages, counts };
+}
 
+/**
+ * Searched list. The workspace's few clients are matched by name first; then a
+ * single pass over a covering index finds every matching invoice (by client or
+ * number) in display order, from which the tab counts and the requested page
+ * are taken. Only that page's rows are then loaded in full.
+ */
+function searchInvoices(workspaceId: number, status: StatusFilter, pageNo: number, q: string): ListResult {
+  const db = getDb();
+  const now = today();
+  const pattern = likePattern(q);
+  const clientIds = db
+    .query<{ id: number }, [number, string]>(`SELECT id FROM clients WHERE workspace_id = ? AND name LIKE ? ESCAPE '\\'`)
+    .all(workspaceId, pattern)
+    .map((r) => r.id);
+  const matches = db
+    .query<{ id: number; status: string; due_date: string }, [number, string, string]>(
+      `SELECT id, status, due_date FROM invoices INDEXED BY invoices_workspace_search
+       WHERE workspace_id = ?
+         AND (number LIKE ? ESCAPE '\\' OR client_id IN (SELECT value FROM json_each(?)))
+       ORDER BY issue_date DESC, id DESC`,
+    )
+    .all(workspaceId, pattern, JSON.stringify(clientIds));
+
+  const counts: Record<StatusFilter, number> = { all: matches.length, draft: 0, sent: 0, overdue: 0, paid: 0 };
+  for (const m of matches) {
+    if (m.status === "draft") counts.draft++;
+    else if (m.status === "paid") counts.paid++;
+    else if (m.status === "sent") {
+      counts.sent++;
+      if (m.due_date < now) counts.overdue++;
+    }
+  }
+  const total = counts[status];
+  const { page, pages } = pageOf(total, pageNo);
+  const inTab = status === "all" ? matches : matches.filter((m) => inStatus(m, status, now));
+  const ids = inTab.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map((m) => m.id);
+  const rows = ids.length
+    ? db
+        .query<ListRow, [string]>(
+          `SELECT ${LIST_COLUMNS}
+           FROM invoices i
+           JOIN clients c ON c.id = i.client_id
+           WHERE i.id IN (SELECT value FROM json_each(?))
+           ORDER BY i.issue_date DESC, i.id DESC`,
+        )
+        .all(JSON.stringify(ids))
+    : [];
   return { rows, total, page, pages, counts };
 }
 
